@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Synth-Style Probability Movie</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-chartjs-2@5.2.0/dist/react-chartjs-2.min.js"></script>
+    <style>
+        body { background-color: #0f172a; color: white; }
+        .slider-thumb::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            background: #38bdf8;
+            cursor: pointer;
+            border-radius: 50%;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        // --- CHART COMPONENTS ---
+        const CurveChart = ({ data, currentFrame }) => {
+            const canvasRef = useRef(null);
+            const chartRef = useRef(null);
+
+            if (!data || !data[currentFrame]) return <div className="h-64 flex items-center justify-center text-gray-500">No Data</div>;
+
+            const frame = data[currentFrame];
+
+            useEffect(() => {
+                const ctx = canvasRef.current.getContext('2d');
+
+                if (chartRef.current) {
+                    chartRef.current.destroy();
+                }
+
+                // Create Gradient
+                const gradient = ctx.createLinearGradient(0, 0, 0, 400);
+                gradient.addColorStop(0, 'rgba(56, 189, 248, 0.5)');
+                gradient.addColorStop(1, 'rgba(56, 189, 248, 0.0)');
+
+                chartRef.current = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: frame.curve_x.map(x => `${Math.round(x/1000)}k`),
+                        datasets: [{
+                            label: 'Implied Probability Density',
+                            data: frame.curve_y,
+                            borderColor: '#38bdf8',
+                            backgroundColor: gradient,
+                            borderWidth: 3,
+                            pointRadius: 0,
+                            fill: true,
+                            tension: 0.4 // Smooths the curve
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: { duration: 0 }, // Disable animation for smooth scrubbing
+                        interaction: { intersect: false, mode: 'index' },
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: { enabled: true }
+                        },
+                        scales: {
+                            x: { grid: { color: '#334155' }, ticks: { color: '#94a3b8' } },
+                            y: { display: false } // Hide PDF values (abstract math)
+                        }
+                    }
+                });
+
+                return () => {
+                    if (chartRef.current) chartRef.current.destroy();
+                };
+            }, [frame]); // Re-render when frame changes
+
+            return <div className="h-96 w-full"><canvas ref={canvasRef}></canvas></div>;
+        };
+
+        // --- MAIN APP ---
+        const App = () => {
+            const [frames, setFrames] = useState([]);
+            const [currentFrameIdx, setCurrentFrameIdx] = useState(0);
+            const [isPlaying, setIsPlaying] = useState(false);
+            const [useLiveServer, setUseLiveServer] = useState(false);
+            const [loading, setLoading] = useState(false);
+
+            // --- SIMULATED DATA GENERATOR (For Demo) ---
+            const generateSimulatedData = () => {
+                const mockFrames = [];
+                let center = 95000;
+                let volatility = 2000;
+
+                // Generate 50 frames of "Market Movement"
+                for (let i = 0; i < 50; i++) {
+                    // Random walk for price
+                    center += (Math.random() - 0.5) * 1000;
+                    // Volatility expansion/contraction
+                    volatility += (Math.random() - 0.5) * 500;
+                    volatility = Math.max(1000, volatility);
+
+                    // Generate Bell Curve points (Gaussian)
+                    const xs = [];
+                    const ys = [];
+                    for (let x = 85000; x <= 105000; x += 500) {
+                        xs.push(x);
+                        // Gaussian Formula
+                        const y = (1 / (volatility * Math.sqrt(2 * Math.PI))) * Math.exp(-0.5 * Math.pow((x - center) / volatility, 2));
+                        ys.push(y);
+                    }
+
+                    mockFrames.push({
+                        timestamp: new Date(Date.now() - (50 - i) * 300000).toISOString(),
+                        curve_x: xs,
+                        curve_y: ys,
+                        implied_median: center
+                    });
+                }
+                return mockFrames;
+            };
+
+            // --- DATA FETCHING ---
+            const fetchData = async () => {
+                setLoading(true);
+                if (useLiveServer) {
+                    try {
+                        const res = await fetch('http://localhost:8000/history');
+                        const data = await res.json();
+                        setFrames(data);
+                        setCurrentFrameIdx(data.length - 1);
+                    } catch (err) {
+                        alert("Could not connect to Python Server on port 8000. Is it running?");
+                    }
+                } else {
+                    // Use Simulation
+                    await new Promise(r => setTimeout(r, 800)); // Fake delay
+                    const data = generateSimulatedData();
+                    setFrames(data);
+                    setCurrentFrameIdx(data.length - 1);
+                }
+                setLoading(false);
+            };
+
+            useEffect(() => {
+                fetchData();
+            }, [useLiveServer]);
+
+            // --- ANIMATION LOOP ---
+            useEffect(() => {
+                let interval;
+                if (isPlaying && frames.length > 0) {
+                    interval = setInterval(() => {
+                        setCurrentFrameIdx(prev => {
+                            if (prev >= frames.length - 1) {
+                                setIsPlaying(false);
+                                return prev;
+                            }
+                            return prev + 1;
+                        });
+                    }, 100); // 100ms per frame
+                }
+                return () => clearInterval(interval);
+            }, [isPlaying, frames]);
+
+            // Format Date
+            const currentDate = frames[currentFrameIdx]
+                ? new Date(frames[currentFrameIdx].timestamp).toLocaleString()
+                : "Loading...";
+
+            const currentPrice = frames[currentFrameIdx]
+                ? Math.round(frames[currentFrameIdx].implied_median).toLocaleString()
+                : "---";
+
+            return (
+                <div className="min-h-screen p-8 flex flex-col items-center">
+
+                    <div className="w-full max-w-5xl bg-slate-800 rounded-xl shadow-2xl overflow-hidden border border-slate-700">
+
+                        {/* HEADER */}
+                        <div className="p-6 border-b border-slate-700 flex justify-between items-center bg-slate-900">
+                            <div>
+                                <h1 className="text-2xl font-bold text-white flex items-center gap-2">
+                                    <span className="text-sky-400">⚡</span> Polymarket "Synth" Model
+                                </h1>
+                                <p className="text-slate-400 text-sm mt-1">Implied Probability Density Function (PDF)</p>
+                            </div>
+                            <div className="flex items-center gap-4">
+                                <div className="flex items-center gap-2 text-sm text-slate-300">
+                                    <span>Simulation</span>
+                                    <button
+                                        onClick={() => setUseLiveServer(!useLiveServer)}
+                                        className={`w-12 h-6 rounded-full p-1 transition-colors ${useLiveServer ? 'bg-sky-500' : 'bg-slate-600'}`}
+                                    >
+                                        <div className={`w-4 h-4 bg-white rounded-full transition-transform ${useLiveServer ? 'translate-x-6' : ''}`}></div>
+                                    </button>
+                                    <span>Live API</span>
+                                </div>
+                                <button
+                                    onClick={fetchData}
+                                    className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm font-medium transition-colors"
+                                >
+                                    ↻ Refresh
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* MAIN CONTENT */}
+                        <div className="p-6">
+                            {loading ? (
+                                <div className="h-96 flex items-center justify-center">
+                                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-sky-400"></div>
+                                </div>
+                            ) : (
+                                <>
+                                    {/* STATS HUD */}
+                                    <div className="grid grid-cols-3 gap-4 mb-6">
+                                        <div className="bg-slate-700/50 p-4 rounded-lg text-center">
+                                            <div className="text-slate-400 text-xs uppercase tracking-wider">Timestamp</div>
+                                            <div className="text-lg font-mono font-semibold text-white">{currentDate}</div>
+                                        </div>
+                                        <div className="bg-slate-700/50 p-4 rounded-lg text-center border-b-2 border-sky-500">
+                                            <div className="text-slate-400 text-xs uppercase tracking-wider">Consensus Price</div>
+                                            <div className="text-2xl font-bold text-sky-400">${currentPrice}</div>
+                                        </div>
+                                        <div className="bg-slate-700/50 p-4 rounded-lg text-center">
+                                            <div className="text-slate-400 text-xs uppercase tracking-wider">Skew</div>
+                                            <div className="text-lg font-semibold text-emerald-400">Neutral</div>
+                                        </div>
+                                    </div>
+
+                                    {/* THE CURVE */}
+                                    <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
+                                        <CurveChart data={frames} currentFrame={currentFrameIdx} />
+                                    </div>
+
+                                    {/* CONTROLS */}
+                                    <div className="mt-6 flex items-center gap-4 bg-slate-700/30 p-4 rounded-lg">
+                                        <button
+                                            onClick={() => setIsPlaying(!isPlaying)}
+                                            className="w-12 h-12 flex items-center justify-center bg-sky-500 hover:bg-sky-400 rounded-full text-white shadow-lg transition-all"
+                                        >
+                                            {isPlaying ? '⏸' : '▶'}
+                                        </button>
+
+                                        <div className="flex-1">
+                                            <input
+                                                type="range"
+                                                min="0"
+                                                max={frames.length - 1}
+                                                value={currentFrameIdx}
+                                                onChange={(e) => {
+                                                    setIsPlaying(false);
+                                                    setCurrentFrameIdx(Number(e.target.value));
+                                                }}
+                                                className="w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer slider-thumb"
+                                            />
+                                            <div className="flex justify-between text-xs text-slate-400 mt-2 font-mono">
+                                                <span>Start</span>
+                                                <span>Current Frame: {currentFrameIdx}</span>
+                                                <span>End</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+
+                    </div>
+
+                    <div className="mt-8 text-slate-500 text-sm max-w-2xl text-center">
+                        <p className="mb-2">
+                            <strong>How to use:</strong> By default, this runs in "Simulation Mode" with generated Gaussian curves.
+                        </p>
+                        <p>
+                            To see real data: Run the Python server script provided locally, then toggle "Live API".
+                        </p>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

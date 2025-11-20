@@ -1,0 +1,10 @@
+*.duckdb
+*.duckdb.wal
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+env/
+*.so
+.DS_Store
