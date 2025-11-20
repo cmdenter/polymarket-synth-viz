@@ -13,7 +13,7 @@ import time
 # --- CONFIGURATION ---
 # The event slug for the market we want to model (e.g., End of Month Bitcoin)
 # You can find this in the URL of the Polymarket page
-EVENT_SLUG = "bitcoin-price-december-2024"
+EVENT_SLUG = "what-price-will-bitcoin-hit-in-2025"
 DB_FILE = "polymarket_data.duckdb"
 
 app = FastAPI()
@@ -52,17 +52,32 @@ def fetch_market_metadata():
     for event in resp:
         for market in event.get('markets', []):
             try:
-                # Parse "Bitcoin > $95,000" -> 95000.0
-                title = market['groupItemTitle']
-                strike = float(title.replace(',','').replace('>','').replace('$','').strip())
+                # Parse strike from groupItemTitle: "↑ 100,000", "$120,000", "↓ 50,000", etc.
+                title = market.get('groupItemTitle', '')
+                if not title:
+                    continue
 
-                # Get the 'Yes' token ID
-                # Outcomes is usually ["Yes", "No"] or ["No", "Yes"]
-                yes_idx = 0 if market['outcomes'][0] == "Yes" else 1
-                token_id = market['clobTokenIds'][yes_idx]
+                # Remove arrows, $, commas, and extra whitespace
+                strike_str = title.replace('↑','').replace('↓','').replace('$','').replace(',','').strip()
+                strike = float(strike_str)
+
+                # Get the 'Yes' token ID from clobTokenIds
+                clob_tokens = market.get('clobTokenIds', [])
+                if not clob_tokens:
+                    continue
+
+                # Parse the JSON string if needed
+                if isinstance(clob_tokens, str):
+                    import json
+                    clob_tokens = json.loads(clob_tokens)
+
+                # First token is usually "Yes"
+                token_id = clob_tokens[0]
 
                 tokens[strike] = token_id
+                print(f"  Found strike: ${strike:,.0f}")
             except Exception as e:
+                print(f"  Skipping market: {e}")
                 continue
     return tokens
 
@@ -72,25 +87,36 @@ def backfill_data(con):
     print(f"Found {len(tokens)} strikes. Downloading history...")
 
     for strike, token_id in tokens.items():
-        # Fetch 5-min candles
+        # Fetch 1-hour candles (valid intervals: '1m', '1h', '6h', '1d', '1w')
         url = "https://clob.polymarket.com/prices-history"
-        params = {"market": token_id, "interval": "5m", "fidelity": 5}
-        resp = requests.get(url, params=params).json()
+        params = {"market": token_id, "interval": "1h"}
+
+        try:
+            resp = requests.get(url, params=params, timeout=10).json()
+        except Exception as e:
+            print(f"Error fetching data for ${strike}: {e}")
+            continue
 
         history = resp.get('history', [])
-        if not history: continue
+        if not history:
+            print(f"No history for strike ${strike}")
+            continue
 
         # Prepare batch insert
         # timestamps come as unix seconds
         data = []
         for h in history:
-            ts = datetime.fromtimestamp(h['t'])
-            price = h['p']
-            data.append((ts, strike, price, token_id))
+            try:
+                ts = datetime.fromtimestamp(h['t'])
+                price = h['p']
+                data.append((ts, strike, price, token_id))
+            except Exception as e:
+                continue
 
-        # Bulk insert is faster
-        con.executemany("INSERT INTO raw_trades VALUES (?, ?, ?, ?)", data)
-        print(f"Ingested {len(data)} points for strike ${strike}")
+        if data:
+            # Bulk insert is faster
+            con.executemany("INSERT INTO raw_trades VALUES (?, ?, ?, ?)", data)
+            print(f"Ingested {len(data)} points for strike ${strike:,.0f}")
 
     print("Data Backfill Complete.")
 
@@ -147,32 +173,32 @@ def get_history():
     """
     con = init_db()
 
-    # DuckDB PIVOT: The secret weapon.
-    # Transforms raw rows into a Matrix: Time x Strike1 x Strike2 ...
+    # Get data with 1-hour time buckets to align timestamps across strikes
     query = """
-        PIVOT raw_trades
-        ON strike_price
-        USING last(price)
-        GROUP BY timestamp
-        ORDER BY timestamp ASC
+        SELECT
+            time_bucket(INTERVAL '1 hour', timestamp) AS hour,
+            strike_price,
+            AVG(price) as price
+        FROM raw_trades
+        GROUP BY hour, strike_price
+        ORDER BY hour, strike_price
     """
-    df_pivot = con.execute(query).df()
-    df_pivot = df_pivot.dropna() # Simple drop for demo, ideally ffill
+    df = con.execute(query).df()
+
+    # Pivot to get strikes as columns
+    df_pivot = df.pivot(index='hour', columns='strike_price', values='price')
+    df_pivot = df_pivot.dropna() # Drop rows where we don't have all strikes
 
     result = []
 
     # Iterate through time (The Movie Frames)
-    for index, row in df_pivot.iterrows():
-        ts = row['timestamp']
-
-        # Extract strikes and prices for this moment
-        # Filter out the timestamp column
+    for hour, row in df_pivot.iterrows():
+        # Extract strikes and prices for this hour
         strikes = []
         prices = []
-        for col in df_pivot.columns:
-            if col != 'timestamp':
-                strikes.append(float(col))
-                prices.append(row[col])
+        for strike_price in df_pivot.columns:
+            strikes.append(float(strike_price))
+            prices.append(row[strike_price])
 
         # Build dataframe for the math engine
         frame_df = pd.DataFrame({'strike_price': strikes, 'price': prices})
@@ -181,7 +207,7 @@ def get_history():
         xs, ys = calculate_curve(frame_df)
 
         result.append({
-            "timestamp": ts.isoformat(),
+            "timestamp": hour.isoformat(),
             "curve_x": xs,
             "curve_y": ys,
             "implied_median": xs[np.argmax(ys)] if len(ys) > 0 else 0
